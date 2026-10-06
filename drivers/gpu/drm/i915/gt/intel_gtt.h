@@ -432,6 +432,11 @@ struct i915_ggtt {
 	struct list_head userfault_list;
 
 	struct mutex error_mutex;
+	/*
+	 * Keep long PF VF-owner PTE writes from starving the display MMIO
+	 * accesses made inside the vblank-evasion critical section.
+	 */
+	struct mutex vf_owner_mmio_lock;
 	struct drm_mm_node error_capture;
 	struct drm_mm_node uc_fw;
 
@@ -659,6 +664,8 @@ int i915_ggtt_sgtable_update_ptes(struct i915_ggtt *ggtt, unsigned int vfid, u64
 gen8_pte_t i915_ggtt_prepare_vf_pte(u16 vfid);
 void i915_ggtt_set_space_owner(struct i915_ggtt *ggtt, u16 vfid,
 			       const struct drm_mm_node *node);
+void i915_ggtt_display_mmio_lock(struct drm_i915_private *i915);
+void i915_ggtt_display_mmio_unlock(struct drm_i915_private *i915);
 
 #define I915_GGTT_SAVE_PTES_NO_VFID BIT(31)
 

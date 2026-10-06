@@ -25,6 +25,11 @@ struct intel_display_rpm_interface {
 	void (*assert_unblock)(const struct drm_device *drm);
 };
 
+struct intel_display_vblank_evade_interface {
+	void (*lock)(struct drm_device *drm);
+	void (*unlock)(struct drm_device *drm);
+};
+
 /**
  * struct intel_display_parent_interface - services parent driver provides to display
  *
@@ -40,6 +45,12 @@ struct intel_display_rpm_interface {
 struct intel_display_parent_interface {
 	/** @rpm: Runtime PM functions */
 	const struct intel_display_rpm_interface *rpm;
+
+	/**
+	 * @vblank_evade: Optional parent serialization around the display MMIO
+	 * critical section. If supplied, both callbacks must be initialized.
+	 */
+	const struct intel_display_vblank_evade_interface *vblank_evade;
 };
 
 #endif

@@ -82,6 +82,7 @@
 #include "gt/intel_gt.h"
 #include "gt/intel_gt_pm.h"
 #include "gt/intel_gt_print.h"
+#include "gt/intel_gtt.h"
 #include "gt/intel_rc6.h"
 #include "gt/iov/intel_iov_query.h"
 #include "gt/uc/intel_guc.h"
@@ -758,8 +759,24 @@ static void i915_welcome_messages(struct drm_i915_private *dev_priv)
 			 "DRM_I915_DEBUG_RUNTIME_PM enabled\n");
 }
 
+static void i915_vblank_evade_lock(struct drm_device *drm)
+{
+	i915_ggtt_display_mmio_lock(to_i915(drm));
+}
+
+static void i915_vblank_evade_unlock(struct drm_device *drm)
+{
+	i915_ggtt_display_mmio_unlock(to_i915(drm));
+}
+
+static const struct intel_display_vblank_evade_interface vblank_evade = {
+	.lock = i915_vblank_evade_lock,
+	.unlock = i915_vblank_evade_unlock,
+};
+
 static const struct intel_display_parent_interface parent = {
 	.rpm = &i915_display_rpm_interface,
+	.vblank_evade = &vblank_evade,
 };
 
 const struct intel_display_parent_interface *i915_driver_parent_interface(void)

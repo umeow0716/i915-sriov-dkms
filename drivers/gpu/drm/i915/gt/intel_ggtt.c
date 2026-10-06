@@ -1919,6 +1919,7 @@ struct i915_ggtt *i915_ggtt_create(struct drm_i915_private *i915)
 	if (!ggtt)
 		return ERR_PTR(-ENOMEM);
 
+	drmm_mutex_init(&i915->drm, &ggtt->vf_owner_mmio_lock);
 	INIT_LIST_HEAD(&ggtt->gt_list);
 
 	return ggtt;
@@ -2065,12 +2066,16 @@ void i915_ggtt_deballoon(struct i915_ggtt *ggtt, struct drm_mm_node *node)
 	drm_mm_remove_node(node);
 }
 
+/* Bound each SR-IOV GGTT MMIO arbitration interval to 64 PTEs (512 bytes). */
+#define VF_GGTT_MMIO_BATCH_PTES 64
+
 static int sgtable_update_ptes_via_cpu(struct i915_ggtt *ggtt, u32 ggtt_addr, struct sg_table *st,
 				       u32 num_entries, const gen8_pte_t pte_pattern)
 {
 	gen8_pte_t __iomem *gtt_entries = ggtt->gsm;
 	dma_addr_t addr;
 	struct sgt_iter iter;
+	unsigned int batch = 0;
 	int n = 0;
 
 	/*
@@ -2082,9 +2087,20 @@ static int sgtable_update_ptes_via_cpu(struct i915_ggtt *ggtt, u32 ggtt_addr, st
 	gtt_entries += ggtt_addr / I915_GTT_PAGE_SIZE;
 
 	for_each_sgt_daddr(addr, iter, st) {
+		if (!batch)
+			mutex_lock(&ggtt->vf_owner_mmio_lock);
+
 		writeq(pte_pattern | addr, gtt_entries++);
 		n++;
+
+		if (++batch == VF_GGTT_MMIO_BATCH_PTES) {
+			mutex_unlock(&ggtt->vf_owner_mmio_lock);
+			cond_resched();
+			batch = 0;
+		}
 	}
+	if (batch)
+		mutex_unlock(&ggtt->vf_owner_mmio_lock);
 
 	return n;
 }
@@ -2105,8 +2121,10 @@ static void sgtable_update_shadow_ggtt(struct i915_ggtt *ggtt, unsigned int vfid
 		return;
 	}
 
-	for_each_sgt_daddr(addr, iter, st)
+	for_each_sgt_daddr(addr, iter, st) {
 		intel_iov_ggtt_shadow_set_pte(iov, vfid, ggtt_addr, pte_pattern | addr);
+		ggtt_addr += I915_GTT_PAGE_SIZE_4K;
+	}
 }
 
 int i915_ggtt_sgtable_update_ptes(struct i915_ggtt *ggtt, unsigned int vfid, u64 ggtt_addr,
@@ -2177,6 +2195,24 @@ gen8_pte_t i915_ggtt_prepare_vf_pte(u16 vfid)
 	return tgl_prepare_vf_pte_vfid(vfid) | GEN8_PAGE_PRESENT;
 }
 
+void i915_ggtt_display_mmio_lock(struct drm_i915_private *i915)
+{
+	if (IS_SRIOV_PF(i915))
+		mutex_lock(&to_gt(i915)->ggtt->vf_owner_mmio_lock);
+}
+
+void i915_ggtt_display_mmio_unlock(struct drm_i915_private *i915)
+{
+	if (IS_SRIOV_PF(i915))
+		mutex_unlock(&to_gt(i915)->ggtt->vf_owner_mmio_lock);
+}
+
+/*
+ * A single VF can own almost the full 4 GiB GGTT aperture.  Rewriting that
+ * range through the CPU therefore performs roughly one million consecutive
+ * MMIO writes.  Keep each arbitration interval short enough for display
+ * vblank evasion while preserving the existing FLR/provisioning transaction.
+ */
 void i915_ggtt_set_space_owner(struct i915_ggtt *ggtt, u16 vfid,
 			       const struct drm_mm_node *node)
 {
@@ -2200,12 +2236,25 @@ void i915_ggtt_set_space_owner(struct i915_ggtt *ggtt, u16 vfid,
 
 	gtt_entries += base >> PAGE_SHIFT;
 	while (size) {
-		gen8_set_pte(gtt_entries++, pte);
-		size -= PAGE_SIZE;
+		u64 batch_size = min_t(u64, size,
+				       VF_GGTT_MMIO_BATCH_PTES * PAGE_SIZE);
+		u64 remaining = batch_size;
+
+		mutex_lock(&ggtt->vf_owner_mmio_lock);
+		while (remaining) {
+			gen8_set_pte(gtt_entries++, pte);
+			remaining -= PAGE_SIZE;
+		}
+		mutex_unlock(&ggtt->vf_owner_mmio_lock);
+
+		size -= batch_size;
+		cond_resched();
 	}
 
 invalidate:
+	mutex_lock(&ggtt->vf_owner_mmio_lock);
 	ggtt->invalidate(ggtt);
+	mutex_unlock(&ggtt->vf_owner_mmio_lock);
 }
 
 unsigned int ggtt_size_to_ptes_size(u64 ggtt_size)
@@ -2242,6 +2291,8 @@ int i915_ggtt_save_ptes(struct i915_ggtt *ggtt, const struct drm_mm_node *node, 
 			unsigned int size, unsigned int flags)
 {
 	gen8_pte_t __iomem *gtt_entries = ggtt->gsm;
+	void *buf_start = buf;
+	unsigned int total_size;
 
 	if (!buf && !size)
 		return ggtt_size_to_ptes_size(node->size);
@@ -2252,18 +2303,31 @@ int i915_ggtt_save_ptes(struct i915_ggtt *ggtt, const struct drm_mm_node *node, 
 	GEM_BUG_ON(!IS_ALIGNED(size, sizeof(gen8_pte_t)));
 	GEM_WARN_ON(size > ggtt_size_to_ptes_size(SZ_4G));
 
-	if (size < ggtt_size_to_ptes_size(node->size))
+	total_size = ggtt_size_to_ptes_size(node->size);
+	if (size < total_size)
 		return -ENOSPC;
-	size = ggtt_size_to_ptes_size(node->size);
+	size = total_size;
 
 	gtt_entries += node->start >> PAGE_SHIFT;
 
-	memcpy_fromio(buf, gtt_entries, size);
+	while (size) {
+		unsigned int batch_size = min_t(unsigned int, size,
+						VF_GGTT_MMIO_BATCH_PTES * sizeof(*gtt_entries));
+
+		mutex_lock(&ggtt->vf_owner_mmio_lock);
+		memcpy_fromio(buf, gtt_entries, batch_size);
+		mutex_unlock(&ggtt->vf_owner_mmio_lock);
+
+		buf += batch_size;
+		gtt_entries += batch_size / sizeof(*gtt_entries);
+		size -= batch_size;
+		cond_resched();
+	}
 
 	if (flags & I915_GGTT_SAVE_PTES_NO_VFID)
-		ggtt_pte_clear_vfid(buf, size);
+		ggtt_pte_clear_vfid(buf_start, total_size);
 
-	return size;
+	return total_size;
 }
 
 /**
@@ -2295,17 +2359,31 @@ int i915_ggtt_restore_ptes(struct i915_ggtt *ggtt, const struct drm_mm_node *nod
 
 	gtt_entries += node->start >> PAGE_SHIFT;
 
+	mutex_lock(&ggtt->vf_owner_mmio_lock);
 	while (size) {
-		pte = *(gen8_pte_t *)buf;
-		if (flags & I915_GGTT_RESTORE_PTES_NEW_VFID)
-			pte |= tgl_prepare_vf_pte_vfid(vfid);
-		gen8_set_pte(gtt_entries++, pte);
+		unsigned int batch_size = min_t(unsigned int, size,
+						VF_GGTT_MMIO_BATCH_PTES * sizeof(*gtt_entries));
 
-		buf += sizeof(gen8_pte_t);
-		size -= sizeof(gen8_pte_t);
+		size -= batch_size;
+		while (batch_size) {
+			pte = *(gen8_pte_t *)buf;
+			if (flags & I915_GGTT_RESTORE_PTES_NEW_VFID)
+				pte |= tgl_prepare_vf_pte_vfid(vfid);
+			gen8_set_pte(gtt_entries++, pte);
+
+			buf += sizeof(gen8_pte_t);
+			batch_size -= sizeof(gen8_pte_t);
+		}
+
+		if (size) {
+			mutex_unlock(&ggtt->vf_owner_mmio_lock);
+			cond_resched();
+			mutex_lock(&ggtt->vf_owner_mmio_lock);
+		}
 	}
 
 	ggtt->invalidate(ggtt);
+	mutex_unlock(&ggtt->vf_owner_mmio_lock);
 
 	return 0;
 }

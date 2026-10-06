@@ -45,6 +45,7 @@
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_rect.h>
 #include <drm/drm_vblank.h>
+#include <drm/intel/display_parent_interface.h>
 
 #include "g4x_dp.h"
 #include "g4x_hdmi.h"
@@ -6859,6 +6860,7 @@ static void intel_pre_update_crtc(struct intel_atomic_state *state,
 static void intel_update_crtc(struct intel_atomic_state *state,
 			      struct intel_crtc *crtc)
 {
+	struct intel_display *display = to_intel_display(state);
 	const struct intel_crtc_state *old_crtc_state =
 		intel_atomic_get_old_crtc_state(state, crtc);
 	struct intel_crtc_state *new_crtc_state =
@@ -6877,6 +6879,8 @@ static void intel_update_crtc(struct intel_atomic_state *state,
 		intel_dsb_commit(new_crtc_state->dsb_commit);
 	} else {
 		/* Perform vblank evasion around commit operation */
+		if (display->parent->vblank_evade)
+			display->parent->vblank_evade->lock(display->drm);
 		intel_pipe_update_start(state, crtc);
 
 		if (new_crtc_state->dsb_commit)
@@ -6889,6 +6893,8 @@ static void intel_update_crtc(struct intel_atomic_state *state,
 		commit_pipe_post_planes(state, crtc);
 
 		intel_pipe_update_end(state, crtc);
+		if (display->parent->vblank_evade)
+			display->parent->vblank_evade->unlock(display->drm);
 	}
 
 	/*
