@@ -109,6 +109,26 @@ ct_drm_fb_helper_alloc_info() {
 	compile_check "$CODE" "IDB_HAVE_DRM_FB_HELPER_ALLOC_INFO" 1
 }
 
+ct_drm_fb_helper_restore_force() {
+	CODE="
+	#include <drm/drm_fb_helper.h>
+	_Static_assert(__builtin_types_compatible_p(
+		typeof(&drm_fb_helper_restore_fbdev_mode_unlocked),
+		int (*)(struct drm_fb_helper *, bool)), \"restore helper ABI\");
+	"
+	compile_check "$CODE" "IDB_DRM_FB_HELPER_RESTORE_FORCE" 1
+}
+
+ct_drm_client_restore_force() {
+	CODE="
+	#include <drm/drm_client.h>
+	_Static_assert(__builtin_types_compatible_p(
+		typeof(((struct drm_client_funcs *)0)->restore),
+		int (*)(struct drm_client_dev *, bool)), \"restore callback ABI\");
+	"
+	compile_check "$CODE" "IDB_DRM_CLIENT_RESTORE_FORCE" 1
+}
+
 ct_drm_client_dev_suspend_one_arg() {
 	CODE="
 	#include <drm/drm_client_event.h>

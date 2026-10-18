@@ -683,7 +683,7 @@ static int intel_fbdev_output_poll_changed(struct drm_device *dev)
 	return 0;
 }
 
-static int intel_fbdev_restore_mode(struct drm_i915_private *dev_priv)
+static int intel_fbdev_restore_mode(struct drm_i915_private *dev_priv, bool force)
 {
 	struct intel_fbdev *ifbdev = dev_priv->display->fbdev.fbdev;
 	int ret;
@@ -694,7 +694,11 @@ static int intel_fbdev_restore_mode(struct drm_i915_private *dev_priv)
 	if (!ifbdev->vma)
 		return -ENOMEM;
 
+#ifdef IDB_DRM_FB_HELPER_RESTORE_FORCE
+	ret = drm_fb_helper_restore_fbdev_mode_unlocked(&ifbdev->helper, force);
+#else
 	ret = drm_fb_helper_restore_fbdev_mode_unlocked(&ifbdev->helper);
+#endif
 	if (ret)
 		return ret;
 
@@ -723,12 +727,22 @@ static void intel_fbdev_client_unregister(struct drm_client_dev *client)
 	}
 }
 
-static int intel_fbdev_client_restore(struct drm_client_dev *client)
+static int intel_fbdev_client_restore(struct drm_client_dev *client
+#ifdef IDB_DRM_CLIENT_RESTORE_FORCE
+				      , bool force
+#endif
+				      )
 {
 	struct drm_i915_private *dev_priv = to_i915(client->dev);
 	int ret;
 
-	ret = intel_fbdev_restore_mode(dev_priv);
+	ret = intel_fbdev_restore_mode(dev_priv,
+#ifdef IDB_DRM_CLIENT_RESTORE_FORCE
+				       force
+#else
+				       false
+#endif
+				       );
 	if (ret)
 		return ret;
 
